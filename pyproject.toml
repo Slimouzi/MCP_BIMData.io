@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bimdata-mcp"
+version = "0.1.0"
+description = "Serveur MCP BIMData déployable : sélection d'éléments, exports Excel, COBie, Smart Views/BCF, contrôle de nommage/complétude, contrôle selon cahier des charges et corrections depuis Excel."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "Stanislas Limouzi", email = "stanislas@bimdata.io" }]
+keywords = ["bim", "ifc", "mcp", "bimdata", "cobie", "bcf", "smart-views", "audit"]
+dependencies = [
+    "fastmcp>=3.0,<4",
+    "openpyxl>=3.1,<4",
+    "xlsxwriter>=3.2,<4",
+    "python-dotenv>=1.0,<2",
+    "pydantic>=2.6,<3",
+    "requests>=2.31,<3",
+    "rapidfuzz>=3.6,<4",
+    # Briques first-party (non publiées sur PyPI) — résolues via [tool.uv.sources].
+    "bim-core>=0.4.0,<0.5",
+    "bimdata-read>=0.1.10,<0.2",
+    "bimdata-write>=0.1.6,<0.2",
+    "bim-reporting>=0.2.0,<0.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4", "ruff>=0.5"]
+
+[project.scripts]
+bimdata-mcp = "bimdata_mcp.__main__:main"
+
+[tool.uv.sources]
+bim-core = { git = "https://github.com/Slimouzi/bim-core.git", tag = "bim-core-v0.4.0" }
+bimdata-read = { git = "https://github.com/Slimouzi/bimdata-read.git", tag = "bimdata-read-v0.1.10" }
+bimdata-write = { git = "https://github.com/Slimouzi/bimdata-write.git", tag = "bimdata-write-v0.1.6" }
+bim-reporting = { git = "https://github.com/Slimouzi/bim-reporting.git", tag = "bim-reporting-v0.2.0" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["bimdata_mcp*"]
+
+[tool.setuptools.package-data]
+bimdata_mcp = ["py.typed", "assets/*.png"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP"]
+ignore = ["E501", "B008"]

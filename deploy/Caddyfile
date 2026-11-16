@@ -1,0 +1,15 @@
+{$MCP_DOMAIN} {
+	encode gzip
+	request_body {
+		max_size 60MB
+	}
+	reverse_proxy bimdata-mcp:8000 {
+		# Réponses MCP en flux (SSE) : ne pas bufferiser.
+		flush_interval -1
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		-Server
+	}
+}

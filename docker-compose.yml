@@ -1,0 +1,35 @@
+# Déploiement type : serveur MCP + Caddy (HTTPS automatique Let's Encrypt).
+#   1. cp .env.example .env  puis compléter
+#   2. DNS : MCP_DOMAIN → IP du serveur (ports 80/443 ouverts)
+#   3. docker compose up -d --build
+services:
+  bimdata-mcp:
+    build: .
+    env_file: .env
+    environment:
+      MCP_ENV: production
+    volumes:
+      - mcp-data:/data
+    restart: unless-stopped
+    expose:
+      - "8000"
+
+  caddy:
+    image: caddy:2
+    depends_on:
+      - bimdata-mcp
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      MCP_DOMAIN: ${MCP_DOMAIN:?définir MCP_DOMAIN dans .env}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
+volumes:
+  mcp-data:
+  caddy-data:
+  caddy-config:
