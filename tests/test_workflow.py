@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import openpyxl
@@ -11,8 +12,11 @@ URL = "https://platform.bimdata.io/spaces/1/projects/2/viewer/3"
 
 
 def _path(meta: dict) -> Path:
+    """Fichier d'un livrable ; pour un rapport PDF, son annexe Excel (les tests lisent le classeur)."""
     from bimdata_mcp.config import get_settings
 
+    if meta.get("annexe_excel"):
+        meta = meta["annexe_excel"]
     name = meta.get("fichier") or meta["name"]
     return next((get_settings().users_dir).glob(f"*/files/{meta['file_id']}/{name}"))
 
@@ -227,7 +231,10 @@ def test_same_frame_for_every_deliverable(mcp_call):
         lv = out["livrable"]
         assert set(lv) >= {"type", "titre", "fichier", "file_id", "download_url", "taille_ko"}
         assert {"synthese", "avertissements", "suite"} <= set(out)
-        assert re.fullmatch(r"\d{8}_[A-Za-z0-9-]+_[A-Za-z0-9-]+(_[A-Za-z0-9-]+)?_[A-Z-]+\.xlsx", lv["fichier"]), lv["fichier"]
+        assert re.fullmatch(r"\d{8}_[A-Za-z0-9-]+_[A-Za-z0-9-]+(_[A-Za-z0-9-]+)?_[A-Z-]+\.(xlsx|pdf)", lv["fichier"]), lv["fichier"]
+        if lv["fichier"].endswith(".pdf"):  # rapport : PDF à la charte, classeur en annexe
+            assert lv["annexe_excel"]["fichier"] == lv["fichier"][:-4] + ".xlsx"
+            lv = lv["annexe_excel"]
         wb = openpyxl.load_workbook(_path(lv))
         assert wb.sheetnames[0] == "Synthèse" and wb.sheetnames[-2:] == ["Lisez-moi", "_bimdata"]
         syn = wb["Synthèse"]
@@ -239,3 +246,126 @@ def test_same_frame_for_every_deliverable(mcp_call):
         for ws in wb.worksheets[1:-2]:
             hdr = ws.cell(2, 1) if ws.cell(1, 1).fill.fgColor.rgb in ("FFF9C72C",) else ws.cell(1, 1)
             assert hdr.fill.fgColor.rgb == "FF2F374A" and hdr.font.name == "Roboto"  # en-tête Primary, Roboto
+
+
+def _classify_w1(fake_env):
+    w1 = next(e for e in fake_env["elements"] if e["uuid"] == "W1")
+    w1["classifications"] = [{"id": 1, "name": "uniformat", "notation": "B2010", "title": "Murs ext."},
+                             {"id": 2, "name": "omniclass", "notation": "21-02", "title": "x"}]
+    fake_env["classifications"] = copy.deepcopy(w1["classifications"])
+    return w1
+
+
+def test_classification_plan_replaces_old_code(mcp_call, fake_env):
+    from tests.conftest import FakeClient
+
+    w1 = _classify_w1(fake_env)
+    mcp_call("set_active_model", bimdata_url=URL)
+    with pytest.raises(Exception, match="Préciser les éléments"):
+        mcp_call("prepare_classification_update", system="uniformat", notation="B3020")
+    plan = mcp_call("prepare_classification_update", system="uniformat", notation="B3020", uuids=["W1", "W2"])
+    assert plan["n_items"] == 2 and not any(c.writes for c in FakeClient.instances)
+    res = mcp_call("apply_plan", plan_id=plan["plan_id"], confirm=True)
+    assert res["succeeded"] == 2 and res["failed"] == 0 and "Revit" in res["report_logiciel_auteur"]
+    assert {(c["name"], c["notation"]) for c in w1["classifications"]} == {("uniformat", "B3020"), ("omniclass", "21-02")}
+    w2 = next(e for e in fake_env["elements"] if e["uuid"] == "W2")
+    assert [(c["name"], c["notation"]) for c in w2["classifications"]] == [("uniformat", "B3020")]
+    # le code créé une fois est réutilisé, pas recréé
+    assert sum(1 for c in FakeClient.instances for w in c.writes if w[0] == "create_classification") == 1
+
+
+def test_classification_and_pset_from_modified_export(mcp_call, fake_env):
+    from bimdata_mcp import files
+    from bimdata_mcp.auth import Identity
+
+    w1 = _classify_w1(fake_env)
+    mcp_call("set_active_model", bimdata_url=URL)
+    mcp_call("select_elements", name="murs", criteria={"ifc_classes": ["IfcWallStandardCase"]})
+    exp = mcp_call("export_selection_excel", selection="murs")
+    p = _path(exp["livrable"])
+    wb = openpyxl.load_workbook(p)
+    ws = wb["IfcWallStandardCase"]
+    labels = [c.value for c in ws[2]]
+    row = next(r for r in range(3, ws.max_row + 1) if ws.cell(r, labels.index("UUID") + 1).value == "W1")
+    ws.cell(row, labels.index("Classification") + 1).value = "uniformat:B2020 | omniclass:21-02"
+    ws.cell(row, labels.index("FireRating") + 1).value = "EI 90"
+    wb.save(p)
+    meta = files.store_upload(Identity("local", "local").storage_key, "export_modifie.xlsx", p.read_bytes())
+    plan = mcp_call("prepare_corrections_from_file", file_id=meta["file_id"])
+    assert plan["summary"]["by_field"] == {"Classification": 1, "Pset_WallCommon.FireRating": 1}, plan
+    res = mcp_call("apply_plan", plan_id=plan["plan_id"], confirm=True)
+    assert res["failed"] == 0, res
+    assert {(c["name"], c["notation"]) for c in w1["classifications"]} == {("uniformat", "B2020"), ("omniclass", "21-02")}
+    pset = next(ps for ps in w1["property_sets"] if ps["name"] == "Pset_WallCommon")
+    assert next(p["value"] for p in pset["properties"] if p["definition"]["name"] == "FireRating") == "EI 90"
+
+
+def test_classification_without_system_rejected():
+    from bimdata_mcp.corrections import parse_classifications
+
+    assert parse_classifications("uniformat:D5010200") == [{"system": "uniformat", "notation": "D5010200"}]
+    with pytest.raises(ValueError, match="système:code"):
+        parse_classifications("D5010200")
+
+
+def test_audit_classifications_report_and_correction(mcp_call, fake_env):
+    els = {e["uuid"]: e for e in fake_env["elements"]}
+    els["W1"]["classifications"] = [{"id": 1, "name": "Uniformat", "notation": "B2010"}]
+    els["W3"]["classifications"] = [{"id": 2, "name": "Uniformat", "notation": "D5010200"}]
+    fake_env["classifications"] = [*copy.deepcopy(els["W1"]["classifications"]),
+                                   *copy.deepcopy(els["W3"]["classifications"])]
+    mcp_call("set_active_model", bimdata_url=URL)
+    out = mcp_call("audit_classifications")
+    assert out["systeme_audite"] == "Uniformat"
+    assert out["livrable"]["download_url"]
+    p = _path(out["livrable"])
+    wb = openpyxl.load_workbook(p)
+    assert {"Synthèse", "Erreurs à corriger", "Données contrôlées", "Exigences"} <= set(wb.sheetnames)
+    s = out["synthese"]
+    assert s["classifications_manquantes"] >= 2 and s["incoherences_classe_ifc"] == 1
+    issues = mcp_call("get_check_issues", check_id=out["check_id"], limit=50)["issues"]
+    w2 = next(i for i in issues if i["uuid"] == "W2")
+    assert w2["proposal"] == "Uniformat:B2010"
+    plan = mcp_call("prepare_corrections_from_check", check_id=out["check_id"], issue_ids=[w2["issue_id"]])
+    res = mcp_call("apply_plan", plan_id=plan["plan_id"], confirm=True)
+    assert res["failed"] == 0
+    assert [(c["name"], c["notation"]) for c in els["W2"]["classifications"]] == [("Uniformat", "B2010")]
+
+
+def test_classification_removal_without_replacement(mcp_call, fake_env):
+    w1 = _classify_w1(fake_env)
+    w1["classifications"].append({"id": 3, "name": "uniformat", "notation": "D4090100", "title": "y"})
+    mcp_call("set_active_model", bimdata_url=URL)
+    with pytest.raises(Exception, match="rien à retirer"):
+        mcp_call("prepare_classification_removal", system="uniformat", notation="Z9999", uuids=["W1", "W2"])
+    plan = mcp_call("prepare_classification_removal", system="uniformat", notation="D4090100", uuids=["W1", "W2"])
+    assert plan["n_items"] == 1 and plan["summary"]["codes_retires"] == {"uniformat:D4090100": 1}
+    res = mcp_call("apply_plan", plan_id=plan["plan_id"], confirm=True)
+    assert res["succeeded"] == 1 and res["failed"] == 0, res
+    assert {(c["name"], c["notation"]) for c in w1["classifications"]} == {("uniformat", "B2010"), ("omniclass", "21-02")}
+    # sans notation : tous les codes du système
+    plan = mcp_call("prepare_classification_removal", system="uniformat", uuids=["W1"])
+    mcp_call("apply_plan", plan_id=plan["plan_id"], confirm=True)
+    assert [(c["name"], c["notation"]) for c in w1["classifications"]] == [("omniclass", "21-02")]
+
+
+def test_classification_removed_from_modified_export(mcp_call, fake_env):
+    from bimdata_mcp import files
+    from bimdata_mcp.auth import Identity
+
+    w1 = _classify_w1(fake_env)
+    mcp_call("set_active_model", bimdata_url=URL)
+    mcp_call("select_elements", name="murs", criteria={"ifc_classes": ["IfcWallStandardCase"]})
+    p = _path(mcp_call("export_selection_excel", selection="murs")["livrable"])
+    wb = openpyxl.load_workbook(p)
+    ws = wb["IfcWallStandardCase"]
+    labels = [c.value for c in ws[2]]
+    row = next(r for r in range(3, ws.max_row + 1) if ws.cell(r, labels.index("UUID") + 1).value == "W1")
+    ws.cell(row, labels.index("Classification") + 1).value = "uniformat:B2010"  # omniclass supprimé
+    wb.save(p)
+    meta = files.store_upload(Identity("local", "local").storage_key, "export_modifie.xlsx", p.read_bytes())
+    plan = mcp_call("prepare_corrections_from_file", file_id=meta["file_id"])
+    assert plan["summary"]["by_field"] == {"Classification": 1}, plan
+    res = mcp_call("apply_plan", plan_id=plan["plan_id"], confirm=True)
+    assert res["failed"] == 0, res
+    assert [(c["name"], c["notation"]) for c in w1["classifications"]] == [("uniformat", "B2010")]

@@ -45,6 +45,7 @@ def _group_of(field: str) -> tuple[str, str]:
 def write_check_report(
     path: Path, result: CheckResult, requirements: list[Requirement], records: dict[str, Record], *,
     check_id: str, ctx: Contexte, requirements_id: str | None, auto_fill_threshold: float = 0.8,
+    extra_sheet: dict | None = None,
 ) -> dict:
     summ = result.summary()
     lv = Livrable(path, ctx)
@@ -150,6 +151,18 @@ def write_check_report(
                  q.max_length, q.unique_scope or "", q.example or "", q.source or ""] for q in requirements],
                role="reference", description="Exigences appliquées lors de ce contrôle.")
 
+    if extra_sheet:  # attendus d'un document de référence (CCBIM) : contrôlés et non contrôlables
+        rows = [[h["cle"], h["parametre"], str(h["valeur"]), h["plage"], h["source"], "Contrôlé"]
+                for h in extra_sheet.get("rows") or []]
+        rows += [["—", x.get("exigence", ""), "", "", x.get("source", ""),
+                  "Non contrôlable : " + (x.get("raison") or "hors maquette")]
+                 for x in extra_sheet.get("non_controlables") or []]
+        lv.feuille(extra_sheet["name"],
+                   [Col("Réf.", "Attendu", width=10), Col("Attendu", "Attendu", width=40),
+                    Col("Règle", "Attendu", width=40), Col("Portée", "Attendu", width=24),
+                    Col("Source", "Document", width=22), Col("Traitement", "Document", width=40)],
+                   rows, role="reference", description="Attendus tirés du document de référence et leur traitement.")
+
     lv.lisez_moi(
         "Rapport de contrôle des données de la maquette BIMData : synthèse, erreurs à corriger avec propositions, "
         "données contrôlées élément par élément et rappel des exigences.",
@@ -160,8 +173,12 @@ def write_check_report(
             "2. Réimporter le fichier (prepare_corrections_from_file) : un plan d'écriture est présenté, rien n'est "
             "écrit sans confirmation.",
             "3. Appliquer le plan, puis relancer le contrôle pour vérifier.",
-            "Lignes « Logiciel auteur » : rattachement spatial, matériau, classification, doublons — à corriger dans "
+            "Lignes « Logiciel auteur » : rattachement spatial, matériau, doublons — à corriger dans "
             "le logiciel de modélisation.",
+            "Classification : saisir « système:code » (ex. uniformat:D5010200) ; l'ancien code du même système "
+            "est retiré, les autres systèmes sont conservés.",
+            "Toute correction écrite dans BIMData (Pset, classification) doit aussi être reportée sur le type dans le "
+            "logiciel auteur, sinon elle est écrasée au prochain export IFC.",
             "Pour vider une valeur, saisir <vide> dans « Valeur corrigée ».",
             "Ne pas modifier les colonnes UUID et Champ ni les deux lignes d'en-tête."])],
     )

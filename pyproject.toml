@@ -19,6 +19,18 @@ dependencies = [
     "pydantic>=2.6,<3",
     "requests>=2.31,<3",
     "rapidfuzz>=3.6,<4",
+    # Couche géométrique (index AABB/OBB/maillage, contrôles de structure et de géométrie).
+    "ifcopenshell>=0.8.5,<0.9",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    # Images des points de vue BCF (rendu côté serveur, sans carte graphique ; police DejaVu de matplotlib).
+    "pillow>=10",
+    "matplotlib>=3.5",
+    # Rapports d'audit PDF.
+    "reportlab>=4",
+    # Lecture du cahier des charges BIM (CCBIM) : PDF et Word.
+    "pypdf>=4",
+    "python-docx>=1.1",
     # Briques first-party (non publiées sur PyPI) — résolues via [tool.uv.sources].
     "bim-core>=0.4.0,<0.5",
     "bimdata-read>=0.1.10,<0.2",

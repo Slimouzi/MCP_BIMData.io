@@ -38,7 +38,8 @@ _YES = {"oui", "yes", "o", "y", "x", "1", "true", "vrai", "ok"}
 _CLEAR = {"<vide>", "<empty>", "<null>", "<effacer>"}
 _GUID_HEADERS = {"globalid", "guid", "uuid", "ifcguid", "ifc guid", "global id"}  # noqa: E501
 _LABEL_TO_PATH = {"nom": "Name", "nom long": "LongName", "type (objecttype)": "ObjectType", "type d'objet": "ObjectType",
-                  "description": "Description", "tag": "Tag"}
+                  "description": "Description", "tag": "Tag", "classification": "Classification",
+                  "classifications": "Classification"}
 
 
 def _read_sheet(wb, name: str) -> list[list[Any]]:
@@ -174,7 +175,68 @@ def parse_corrections_file(path: Path) -> tuple[str, dict, list[dict]]:
 def _writable_path(p: str | None) -> bool:
     if not p or p.lower() in READ_ONLY_FIELDS or p.startswith("*."):
         return False
-    return "." in p or p.lower() in WRITABLE_ATTRIBUTES
+    return "." in p or p.lower() in WRITABLE_ATTRIBUTES or p.lower() == "classification"
+
+
+def parse_classifications(value: Any) -> list[dict]:
+    """``"uniformat:D5010200 | omniclass:21-02"`` → ``[{system, notation}, …]``.
+
+    Le système est obligatoire (« système:code ») : sans lui, impossible de savoir quel
+    ancien code remplacer. Lève ``ValueError`` si une entrée est mal formée.
+    """
+    out: list[dict] = []
+    for part in str(value or "").split("|"):
+        part = part.strip()
+        if not part:
+            continue
+        system, sep, code = part.partition(":")
+        if not sep or not system.strip() or not code.strip():
+            raise ValueError(f"« {part} » : format attendu système:code (ex. uniformat:D5010200)")
+        out.append({"system": system.strip(), "notation": code.strip()})
+    return out
+
+
+def _split_code(c: str) -> dict:
+    system, _, code = c.partition(":")
+    return {"system": system.strip(), "notation": code.strip()}
+
+
+def _classification_item(ch: dict, rec: Record) -> tuple[dict | None, str | None]:
+    """Changement de la colonne Classification → item de plan, ou raison du rejet.
+
+    - ``<vide>`` (ou cellule vidée dans un export modifié) : retrait de tous les codes ;
+    - export modifié (``compare``) : un code supprimé de la cellule est retiré de l'élément ;
+    - nouveau code : associé, l'ancien code du même système est remplacé.
+    """
+    raw_val = ch["value"]
+    cleared = isinstance(raw_val, str) and raw_val.strip().lower() in _CLEAR
+    if raw_val in (None, "") or cleared:
+        if not cleared and not ch.get("compare"):
+            return None, "classification vide : saisir <vide> pour retirer toutes les classifications"
+        if not rec.classifications:
+            return (None, None) if ch.get("compare") else (None, "l'élément n'a aucune classification à retirer")
+        codes = []
+    else:
+        try:
+            codes = parse_classifications(raw_val)
+        except ValueError as exc:
+            return None, str(exc)
+    current = {c.lower() for c in rec.classifications}
+    wanted = {f"{c['system']}:{c['notation']}".lower() for c in codes}
+    todo = [c for c in codes if f"{c['system']}:{c['notation']}".lower() not in current]
+    remove: list[dict] = []
+    if not codes or ch.get("compare"):
+        new_systems = {c["system"].lower() for c in todo}  # ceux-là sont remplacés à l'association
+        remove = [_split_code(c) for c in rec.classifications
+                  if c.lower() not in wanted and c.partition(":")[0].strip().lower() not in new_systems]
+    if not todo and not remove:
+        if not ch.get("compare"):
+            return None, "classification identique à la maquette (déjà corrigée ?)"
+        return None, None
+    return {"uuid": rec.uuid, "ifc_class": rec.ifc_class, "name": rec.name, "kind": "classification",
+            "pset": "", "prop": "", "field": "Classification", "old_value": " | ".join(rec.classifications),
+            "new_value": " | ".join(f"{c['system']}:{c['notation']}" for c in codes) or None, "codes": todo,
+            "remove": remove, "value_type": None, "source": ch.get("source"), "creates": False}, None
 
 
 def _read_export_v2(wb, meta: dict) -> list[dict]:
@@ -248,6 +310,18 @@ def validate_changes(raw: list[dict], records: dict[str, Record], *, value_types
             if not ch.get("compare"):
                 rejected.append({**ch, "reason": why})
             continue
+        if fld.lower() == "classification":
+            item, why = _classification_item(ch, rec)
+            if why:
+                rejected.append({**ch, "reason": why})
+            if item:
+                k = (uuid, "classification")
+                if k in seen:
+                    items[seen[k]] = item
+                else:
+                    seen[k] = len(items)
+                    items.append(item)
+            continue
         if "." in fld:
             kind, pset, prop = "property", *fld.split(".", 1)
         elif fld.lower() in WRITABLE_ATTRIBUTES:
@@ -297,8 +371,14 @@ def build_plan(items: list[dict], *, target: dict, origin: str, rejected: list[d
 
     risks = []
     n_attr = sum(1 for i in items if i["kind"] == "attribute")
-    n_clear = sum(1 for i in items if i["new_value"] is None)
+    n_clear = sum(1 for i in items if i["new_value"] is None and i["kind"] != "classification")
+    n_cls_rm = sum(1 for i in items if i["kind"] == "classification" and i.get("remove"))
     n_create = sum(1 for i in items if i["creates"])
+    n_cls = sum(1 for i in items if i["kind"] == "classification" and i.get("codes"))
+    if n_cls:
+        risks.append(f"{n_cls} élément(s) reclassé(s) : nouveau code associé, ancien code du même système retiré.")
+    if n_cls_rm:
+        risks.append(f"{n_cls_rm} élément(s) avec classification(s) retirée(s) sans remplacement.")
     if n_attr:
         risks.append(f"{n_attr} attribut(s) IFC modifié(s) (Name/LongName…) : renommage visible dans tous les outils.")
     if n_clear:
