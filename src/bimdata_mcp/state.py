@@ -53,7 +53,7 @@ def _user_lock(key: str) -> threading.Lock:
 
 
 class UserState:
-    KINDS = ("selections", "requirements", "checks", "plans", "files", "journal")
+    KINDS = ("selections", "requirements", "checks", "plans", "files", "journal", "jobs", "ccbim")
 
     def __init__(self, identity: Identity):
         self.identity = identity

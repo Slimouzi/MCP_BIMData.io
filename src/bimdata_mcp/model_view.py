@@ -210,7 +210,8 @@ def _record_from_element(el: dict, spatial: dict, zones: dict, space_names: dict
         code = c.get("notation") or c.get("identifier") or c.get("code")
         if not code:
             continue
-        system = c.get("name") or c.get("source") or c.get("system") or ""
+        # API élément : « name » ; snapshot bimdata-read : « type » (ex. "Uniformat - 1998").
+        system = c.get("name") or c.get("type") or c.get("source") or c.get("system") or ""
         cls.append(f"{system}:{code}" if system else str(code))
     rec.classifications = _unique(cls)
     mats = [((m or {}).get("material") or {}).get("name") for m in el.get("material_list") or []]

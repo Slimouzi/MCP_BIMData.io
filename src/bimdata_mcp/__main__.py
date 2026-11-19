@@ -14,6 +14,9 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--path", default="/mcp", help="Chemin de l'endpoint MCP (HTTP).")
     args = parser.parse_args()
+    import os
+
+    os.environ["MCP_TRANSPORT"] = args.transport  # liens de fichiers : HTTP seulement si le serveur sert le web
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     from .config import get_settings

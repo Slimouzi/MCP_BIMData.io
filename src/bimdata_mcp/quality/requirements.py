@@ -13,10 +13,11 @@ ValueType = Literal["string", "number", "integer", "boolean", "date"]
 SEVERITY_ORDER = {"bloquant": 0, "majeur": 1, "mineur": 2, "info": 3}
 PHASES = ("ESQ", "DIAG", "APS", "APD", "AVP", "PRO", "DCE", "EXE", "VISA", "DOE", "GESTION", "EXP")
 
-#: Champs qu'une correction peut écrire via l'API (les autres relèvent du
-#: logiciel auteur : rattachement spatial, matériau, classe IFC…).
+#: Champs qu'une correction ne peut pas écrire via l'API (ils relèvent du
+#: logiciel auteur : rattachement spatial, matériau, classe IFC…). Les Psets,
+#: les attributs nommés et les classifications sont modifiables.
 READ_ONLY_FIELDS = {"globalid", "ifcclass", "building", "storey", "space", "zone",
-                    "classification", "material", "layer", "typename"}
+                    "material", "layer", "typename"}
 
 
 class Requirement(BaseModel):

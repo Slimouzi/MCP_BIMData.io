@@ -16,6 +16,9 @@ import pytest
 
 _ids = itertools.count(1000)
 
+# Index géométrique calculé dans le processus des tests (rapide) ; test_geometry vérifie le processus séparé.
+os.environ.setdefault("MCP_GEOMETRY_SUBPROCESS", "0")
+
 
 def _prop(name, value, vt="IfcLabel"):
     return {"id": next(_ids), "definition": {"name": name, "value_type": vt}, "value": value}
@@ -123,11 +126,26 @@ class FakeClient:
     def list_clouds(self): return [{"id": 1, "name": "Espace"}]
     def list_projects(self, c): return [{"id": 2, "name": "Projet test"}]
     def list_models(self, c, p): return [{"id": 3, "name": "Maquette test.ifc", "type": "IFC"}]
-    def list_documents(self): return self.documents
+    ged_folders: list = []
+    ged_documents: list = []
+
+    def list_documents(self): return copy.deepcopy(FakeClient.ged_documents)
+
     def upload_document(self, path, name=None, parent_id=None):
-        doc = {"id": len(self.documents) + 1, "name": name or path.name}
+        doc = {"id": len(FakeClient.ged_documents) + 1, "name": name or path.name, "parent_id": parent_id,
+               "size": path.stat().st_size}
+        FakeClient.ged_documents.append(doc)
         self.documents.append(doc)
         return doc
+
+    def list_folders(self): return copy.deepcopy(FakeClient.ged_folders)
+    def root_folder_id(self): return 100
+
+    def create_folder(self, name, parent_id=None):
+        f = {"id": 200 + len(FakeClient.ged_folders), "name": name, "parent_id": parent_id or 100}
+        FakeClient.ged_folders.append(f)
+        self.writes.append(("folder", name, parent_id))
+        return f
 
     # écritures
     def _el(self, uuid):
@@ -161,9 +179,78 @@ class FakeClient:
             _prop(p["definition"]["name"], p["value"], p["definition"]["value_type"]) for p in payload["properties"]]})
         self.writes.append(("create_pset", uuid, payload["name"]))
 
+    # classifications
+    def list_model_classifications(self):
+        return copy.deepcopy(self.m.setdefault("classifications", []))
+
+    def create_model_classification(self, *, name, notation, title=None):
+        c = {"id": next(_ids), "name": name, "notation": notation, "title": title}
+        self.m.setdefault("classifications", []).append(c)
+        self.writes.append(("create_classification", name, notation))
+        return copy.deepcopy(c)
+
+    def assign_classification_elements(self, relations):
+        codes = {c["id"]: c for c in self.m.get("classifications", [])}
+        for r in relations:
+            self._el(r["element_uuid"])["classifications"].append(copy.deepcopy(codes[r["classification_id"]]))
+        self.writes.append(("assign_classification", len(relations)))
+
+    def remove_element_classification(self, uuid, classification_id):
+        el = self._el(uuid)
+        el["classifications"] = [c for c in el["classifications"] if c["id"] != classification_id]
+        self.writes.append(("remove_classification", uuid, classification_id))
+
+    #: topics BCF du projet, partagés entre les clients d'un même test (comme le serveur BIMData)
+    project_topics: list = []
+    #: extensions du projet BCF ; ``refuse_extensions`` simule des droits insuffisants
+    extensions: dict = {}
+    refuse_extensions: bool = False
+
+    def get_bcf_extensions(self):
+        return copy.deepcopy(FakeClient.extensions)
+
+    def declare_bcf_extension(self, kind, value):
+        if FakeClient.refuse_extensions:
+            raise PermissionError("BIMData 403 on extension")
+        FakeClient.extensions.setdefault(kind, []).append(value)
+        self.writes.append(("bcf_extension", kind, value))
+
     def create_bcf_full_topic(self, payload):
         self.topics.append(payload)
-        return {"guid": f"topic-{len(self.topics)}"}
+        guid = f"topic-{len(FakeClient.project_topics) + 1}"
+        FakeClient.project_topics.append({**payload, "guid": guid})
+        return {"guid": guid}
+
+    def list_bcf_topics(self):
+        return copy.deepcopy(FakeClient.project_topics)
+
+    def list_bcf_full_topics(self):
+        return copy.deepcopy(FakeClient.project_topics)
+
+    def _vps(self, topic_guid):
+        return next(t for t in FakeClient.project_topics if t["guid"] == topic_guid).setdefault("viewpoints", [])
+
+    def update_bcf_viewpoint(self, topic_guid, viewpoint_guid, fields):
+        next(v for v in self._vps(topic_guid) if v["guid"] == viewpoint_guid).update(fields)
+        self.writes.append(("bcf_vp_update", topic_guid, viewpoint_guid, fields))
+
+    def delete_bcf_viewpoint(self, topic_guid, viewpoint_guid):
+        vps = self._vps(topic_guid)
+        vps[:] = [v for v in vps if v["guid"] != viewpoint_guid]
+        self.writes.append(("bcf_vp_delete", topic_guid, viewpoint_guid))
+
+    def add_bcf_comment(self, topic_guid, comment, viewpoint_guid=None):
+        self.writes.append(("bcf_comment", topic_guid, comment, viewpoint_guid))
+
+    def add_bcf_viewpoint(self, topic_guid, viewpoint):
+        self.writes.append(("bcf_viewpoint", topic_guid))
+        return {"guid": f"vp-{topic_guid}"}
+
+    def update_bcf_topic(self, topic_guid, fields):
+        for t in FakeClient.project_topics:
+            if t["guid"] == topic_guid:
+                t.update(fields)
+        self.writes.append(("bcf_update", topic_guid, fields))
 
 
 @pytest.fixture()
@@ -172,6 +259,7 @@ def fake_env(tmp_path, monkeypatch):
     monkeypatch.setenv("MCP_AUTH_MODE", "none")
     monkeypatch.setenv("MCP_PUBLIC_URL", "http://testserver")
     monkeypatch.setenv("MCP_FILE_SECRET", "test-secret")
+    monkeypatch.setenv("MCP_REPORTS_DIR", str(tmp_path / "rapports"))
     from bimdata_mcp import bimdata, config, service
 
     config.get_settings.cache_clear()
@@ -188,6 +276,13 @@ def fake_env(tmp_path, monkeypatch):
     else:
         model = build_model()
     FakeClient.instances.clear()
+    FakeClient.project_topics.clear()
+    FakeClient.extensions = {"topic_type": ["Issue", "Request"], "priority": ["High", "Medium", "Low"],
+                             "topic_status": ["Open", "Closed"], "topic_label": ["Architecture"]}
+    FakeClient.refuse_extensions = False
+    FakeClient.ged_folders = [{"id": 100, "name": "Racine", "parent_id": None},
+                              {"id": 101, "name": "03 - Synthèse", "parent_id": 100}]
+    FakeClient.ged_documents = []
     make = lambda target, identity: FakeClient(model, **target.to_dict())  # noqa: E731
     monkeypatch.setattr(service, "make_client", make)
     monkeypatch.setattr(service, "make_navigation_client", lambda identity: FakeClient(model))

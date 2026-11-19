@@ -31,6 +31,16 @@ STATUS_LABELS = {
     "hors_plage": "Hors plage",
     "doublon": "Doublon",
     "optionnel_absent": "Optionnel non renseigné",
+    "autre_systeme": "Classée dans un autre système seulement",
+    "codes_multiples": "Plusieurs codes du même système",
+    "incoherent_classe": "Code incohérent avec la classe IFC",
+    "incoherent_type": "Code différent du reste du type",
+    # Règles de structuration / géométrie (S…, G…)
+    "non_conforme": "Non conforme à la règle",
+    "sous_seuil": "Sous le seuil",
+    "incoherent": "Incohérent",
+    "sans_geometrie": "Sans géométrie",
+    "exclu": "Exclu du seuil (information)",
 }
 NON_CONFORM = {k for k in STATUS_LABELS if k not in ("conforme", "optionnel_absent")}
 
@@ -56,6 +66,17 @@ class Issue:
     proposal: Any = None
     confidence: float = 0.0
     proposal_reason: str = ""
+    # Contrôles par règles (structure, géométrie…) : None pour les contrôles de données.
+    rule_id: str | None = None
+    elements: list[dict] | None = None  # [{uuid, role}] : éléments en cause (A, B, porte, hôte…)
+    measure: dict | None = None  # {value, unit}
+    threshold: dict | None = None  # {value, unit, source}
+    clash_type: str | None = None
+    group: str | None = None
+    where: dict | None = None  # {storey, space, center} (champ « location » de la spécification)
+    bbox: list[float] | None = None  # AABB de la zone / de l'intersection (point de vue BCF)
+    method: str | None = None  # Données | Bbox | Maillage
+    cell: str | None = None  # case de matrice de conflits (run_clash_matrix)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -87,6 +108,10 @@ class CheckResult:
             "by_status": {STATUS_LABELS.get(k, k): v for k, v in by_status.most_common()},
             "proposals": sum(1 for i in self.issues if i.proposal not in (None, "")),
             "proposals_high_confidence": sum(1 for i in self.issues if i.confidence >= 0.8),
+            # règles réellement contrôlées (au moins un élément examiné ou une anomalie) sur le total
+            "rules_controlled": sum(1 for r in self.per_requirement
+                                    if (r.get("applicable") or 0) > 0 or (r.get("non_conformes") or 0) > 0),
+            "rules_total": len(self.per_requirement),
         }
 
 

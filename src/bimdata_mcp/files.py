@@ -28,7 +28,7 @@ from urllib.parse import quote, urlparse
 from .config import get_settings
 from .state import UserState, new_id, now_iso, slug
 
-ALLOWED_INPUT_SUFFIXES = {".xlsx", ".xlsm", ".xls", ".csv", ".json", ".ifc", ".txt"}
+ALLOWED_INPUT_SUFFIXES = {".xlsx", ".xlsm", ".xls", ".csv", ".json", ".ifc", ".txt", ".bcfzip", ".bcf"}  # BCF : exports de clash
 
 
 def _sign(*parts: str) -> str:
@@ -49,8 +49,56 @@ def files_dir(state: UserState) -> Path:
     return d
 
 
+#: Livrables copiés dans le dossier des rapports (les images BCF et fichiers techniques n'y vont pas).
+REPORT_KINDS = {"check-report", "audit-report", "export", "cobie", "template", "report"}
+
+
+def http_links_enabled() -> bool:
+    """Liens HTTP de téléchargement actifs seulement quand le serveur MCP sert le web (transport HTTP). En stdio
+    (Claude Desktop, Claude Code), aucun serveur web : les liens pointent vers le fichier local."""
+    import os
+
+    return os.getenv("MCP_TRANSPORT", "http").strip().lower() != "stdio"
+
+
+def reports_dir() -> Path | None:
+    """Dossier lisible où sont copiés les rapports : MCP_REPORTS_DIR, sinon ~/Documents/BIMData MCP/Rapports pour un
+    serveur local (sans authentification, hors production) ; aucun sur un serveur partagé."""
+    import os
+
+    raw = os.getenv("MCP_REPORTS_DIR", "").strip()
+    if raw.lower() in ("0", "non", "none", "off"):
+        return None
+    if raw:
+        return Path(raw).expanduser()
+    s = get_settings()
+    if s.auth_mode == "none" and not s.is_production:
+        return Path.home() / "Documents" / "BIMData MCP" / "Rapports"
+    return None
+
+
+def _publish_local(path: Path) -> Path | None:
+    d = reports_dir()
+    if d is None:
+        return None
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        dest = d / path.name
+        k = 2
+        while dest.exists() and dest.read_bytes() != path.read_bytes():
+            dest = d / f"{path.stem}_{k}{path.suffix}"
+            k += 1
+        import shutil
+
+        shutil.copyfile(path, dest)
+        return dest.resolve()
+    except OSError:
+        return None
+
+
 def register_file(state: UserState, path: Path, *, kind: str, label: str = "") -> dict:
-    """Enregistre un fichier déjà écrit dans ``files_dir`` et renvoie ses métadonnées."""
+    """Enregistre un fichier déjà écrit dans ``files_dir`` et renvoie ses métadonnées (avec ``chemin_local`` : copie
+    lisible du rapport dans le dossier des rapports, quand le serveur tourne sur le poste)."""
     file_id = path.parent.name
     meta = {
         "file_id": file_id,
@@ -60,6 +108,9 @@ def register_file(state: UserState, path: Path, *, kind: str, label: str = "") -
         "size": path.stat().st_size,
         "created_at": now_iso(),
     }
+    local = _publish_local(path) if kind in REPORT_KINDS or path.suffix.lower() in (".pdf", ".xlsx") else None
+    if local:
+        meta["chemin_local"] = str(local)
     (path.parent / "meta.json").write_text(json.dumps(meta, ensure_ascii=False))
     meta["download_url"] = download_url(state, file_id, path.name)
     return meta
@@ -73,6 +124,16 @@ def new_output_path(state: UserState, filename: str) -> Path:
 
 
 def download_url(state: UserState, file_id: str, name: str) -> str:
+    """Lien du fichier : HTTP signé si le serveur sert le web, sinon ``file://`` (copie dans le dossier des rapports,
+    ou fichier du serveur) — jamais un lien vers un serveur web qui n'existe pas."""
+    if not http_links_enabled():
+        local = files_dir(state) / file_id / name
+        meta = local.parent / "meta.json"
+        try:
+            copy = json.loads(meta.read_text()).get("chemin_local") if meta.exists() else None
+        except Exception:  # noqa: BLE001
+            copy = None
+        return Path(copy or local).resolve().as_uri()
     s = get_settings()
     exp = str(int(time.time()) + s.file_link_ttl_s)
     owner = state.identity.storage_key
